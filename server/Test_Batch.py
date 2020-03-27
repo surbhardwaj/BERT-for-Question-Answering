@@ -1,5 +1,4 @@
 import numpy as np
-import pandas as pd
 import argparse
 from pytorch_pretrained_bert.tokenization import (BasicTokenizer,
                                                   BertTokenizer,whitespace_tokenize)
@@ -10,8 +9,6 @@ from pytorch_pretrained_bert.modeling import BertForQuestionAnswering, BertConfi
 import math
 from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler,
                               TensorDataset)
-from tqdm import tqdm
-from termcolor import colored, cprint
 
 
 class SquadExample(object):
@@ -497,52 +494,25 @@ RawResult = collections.namedtuple("RawResult",
                                    ["unique_id", "start_logits", "end_logits"])
 
 
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--paragraph", default=None, type=str)
-    parser.add_argument("--model", default=None, type=str)
-    parser.add_argument("--max_seq_length", default=384, type=int)
-    parser.add_argument("--doc_stride", default=128, type=int)
-    parser.add_argument("--max_query_length", default=64, type=int)
-    parser.add_argument("--config_file", default=None, type=str)
-    parser.add_argument("--max_answer_length", default=30, type=int)
-    
-    args = parser.parse_args()
-    para_file = args.paragraph
-    model_path = args.model
-    
+def load_model(config_file_path,model_path):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     n_gpu = torch.cuda.device_count()
-    
-    ### Raeding paragraph
-    f = open(para_file, 'r')
-    para = f.read()
-    f.close()
-    
-    ## Reading question
-#     f = open(ques_file, 'r')
-#     ques = f.read()
-#     f.close()
-    
-    para_list = para.split('\n\n')
+    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased', do_lower_case=True)
+    config = BertConfig(config_file_path)
+    model = BertForQuestionAnswering(config)
+    model.load_state_dict(torch.load(model_path,map_location=device))
+    model.to(device)
+    model=model.eval()
+    return model,device
+
+def get_answers(model,device,context,questions,max_seq_length=384,doc_stride=128,max_query_length=64,max_answer_length=30):
     
     input_data = []
-    i = 1
-    for para in para_list :
-        paragraphs = {}
-        splits = para.split('\nQuestions:')
-        paragraphs['id'] = i
-        paragraphs['text'] = splits[0].replace('Paragraph:', '').strip('\n')
-        paragraphs['ques']=splits[1].lstrip('\n').split('\n')
-        input_data.append(paragraphs)
-        i+=1
-       
-    
-    ## input_data is a list of dictionary which has a paragraph and questions
-
-    
+    paragraphs = {}
+    paragraphs['id'] = 0
+    paragraphs['text']=context
+    paragraphs['ques']=questions
+    input_data.append(paragraphs)
     examples = read_squad_examples(input_data)
     tokenizer = BertTokenizer.from_pretrained('bert-base-uncased', do_lower_case=True)
     
@@ -550,31 +520,24 @@ def main():
     eval_features = convert_examples_to_features(
             examples = examples,
             tokenizer=tokenizer,
-            max_seq_length=args.max_seq_length,
-            doc_stride=args.doc_stride,
-            max_query_length=args.max_query_length)
+            max_seq_length=max_seq_length,
+            doc_stride=doc_stride,
+            max_query_length=max_query_length)
     
     
     
     all_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
     all_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
     all_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
-    all_example_index = torch.arange(all_input_ids.size(0), dtype=torch.long)
+    all_example_index = torch.arange(all_input_ids.size(0), dtype=torch.long) 
     
-    ### Loading Pretrained model for QnA 
-    config = BertConfig(args.config_file)
-    model = BertForQuestionAnswering(config)
-    model.load_state_dict(torch.load(model_path))
-    model.to(device)
-    model=model.eval()
-
     pred_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_example_index)
     # Run prediction for full data
     pred_sampler = SequentialSampler(pred_data)
     pred_dataloader = DataLoader(pred_data, sampler=pred_sampler, batch_size=9)
     
     predictions = []
-    for input_ids, input_mask, segment_ids, example_indices in tqdm(pred_dataloader):
+    for input_ids, input_mask, segment_ids, example_indices in pred_dataloader:
         input_ids = input_ids.to(device)
         input_mask = input_mask.to(device)
         segment_ids = segment_ids.to(device)
@@ -598,26 +561,13 @@ def main():
                                              end_logits=end_logits))
                 
        
-        output = predict(examples, features, all_results,args.max_answer_length)
+        output = predict(examples, features, all_results,max_answer_length)
         predictions.append(output)
- 
-   
-    ### For printing the results ####
+        
     index = None
-    for example in examples:
-        if index!= example.example_id:
-            print(example.para_text)
-            index = example.example_id
-            print('\n')
-            print(colored('***********Question and Answers *************', 'red'))
-          
-        ques_text = colored(example.question_text, 'blue')
-        print(ques_text)
-        prediction = colored(predictions[math.floor(example.unique_id/12)][example], 'green', attrs=['reverse', 'blink'])
-        print(prediction)
-        print('\n')
-
-   
-
-if __name__ == "__main__":
-    main()
+    quests_ans={}
+    for example in examples:        
+        ques_text = example.question_text
+        quests_ans[example.question_text]=predictions[math.floor(example.unique_id/12)][example]
+        
+    return quests_ans
